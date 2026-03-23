@@ -1,0 +1,57 @@
+{
+  "video": "test.mp4",
+  "fps": 30,
+  "frames": [
+    {
+      "frame_id": 1,
+      "anomalies": [
+        {
+          "track_id": 1,
+          "class": "car",
+          "is_anomalous": false,
+          "reason": "正常行驶"
+        },
+        {
+          "track_id": 2,
+          "class": "car",
+          "is_anomalous": false,
+          "reason": "正常行驶"
+        }
+      ]
+    },
+    {
+      "frame_id": 2,
+      "anomalies": [
+        {
+          "track_id": 1,
+          "class": "car",
+          "is_anomalous": true,
+          "reason": "位置突跳，速度异常"
+        },
+        {
+          "track_id": 2,
+          "class": "car",
+          "is_anomalous": false,
+          "reason": "正常行驶"
+        }
+      ]
+    },
+    {
+      "frame_id": 3,
+      "anomalies": [
+        {
+          "track_id": 1,
+          "class": "car",
+          "is_anomalous": false,
+          "reason": "恢复正常"
+        },
+        {
+          "track_id": 3,
+          "class": "person",
+          "is_anomalous": true,
+          "reason": "人物躺倒，宽高比异常"
+        }
+      ]
+    }
+  ]
+}

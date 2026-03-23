@@ -166,7 +166,7 @@ class BasePredictor:
     def __call__(self, source=None, model=None):
         
         self.run_callbacks("on_predict_start")
-        model= self.model if self.done_setup else self.setup(source, model)
+        model= self.model if self.done_setup else self.setup(source, model) # 调用setup把视频拆成帧，self.dataset 是存放所有帧迭代器
         model.eval()
         self.seen, self.windows, self.dt = 0, [], (ops.Profile(), ops.Profile(), ops.Profile())
         self.all_outputs = []

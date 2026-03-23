@@ -15,6 +15,21 @@ from yolo.utils import DEFAULT_CONFIG, ROOT, ops
 from yolo.utils.checks import check_imgsz
 from yolo.utils.plotting import Annotator, colors, save_one_box
 
+# 新增：评估指标 - 导入结果导出器
+import sys
+import os
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
+try:
+    from evaluation.result_exporter import TrackingResultExporter
+    EXPORT_AVAILABLE = True
+except ImportError:
+    EXPORT_AVAILABLE = False
+    print("警告: evaluation模块不可用，禁用评估指标导出")
+
 tracker = None
 
 # 简单异常启发式的阈值(每帧像素数和宽高比)
@@ -32,7 +47,10 @@ def init_tracker():
 
 
 def _track_is_anomalous(track, names):
-    """如果给定的追踪满足我们的异常判断标准，返回True。"""
+    """如果给定的追踪满足我们的异常判断标准，返回(True, reason)。否则返回(False, '')。
+    
+    新增：评估指标 - 返回异常原因便于评估记录
+    """
     cls_idx = int(track.detclass)
     cls_name = names[cls_idx] if names is not None and cls_idx < len(names) else str(cls_idx)
     # 计算最后两个质心之间的位移
@@ -42,17 +60,25 @@ def _track_is_anomalous(track, names):
         speed = (dx * dx + dy * dy) ** 0.5
     else:
         speed = 0
+    
     # 车辆异常：突然的大位移
     if cls_name in ("car", "truck", "bus", "motorbike", "bicycle") and speed > CAR_SPEED_THRESHOLD:
-        return True
+        # 新增：评估指标 - 返回异常原因
+        reason = f'速度过快 (突跳像素数>{CAR_SPEED_THRESHOLD:.1f})'
+        return True, reason
+    
     # 人物异常：宽高比表示躺倒
     if cls_name == "person" and len(track.bbox_history) > 0:
         bbox = track.bbox_history[-1]
         w = bbox[2] - bbox[0]
         h = bbox[3] - bbox[1]
         if w > 0 and (h / w) < PERSON_ASPECT_RATIO_THRESHOLD:
-            return True
-    return False
+            # 新增：评估指标 - 返回异常原因
+            reason = f'俯身/躺下 (长宽比<{PERSON_ASPECT_RATIO_THRESHOLD})'
+            return True, reason
+    
+    # 新增：评估指标 - 返回空原因表示正常
+    return False, ''
 
 
 rand_color_list = []
@@ -96,6 +122,21 @@ def random_color_list():
 
 
 class DetectionPredictor(BasePredictor):
+
+    def __init__(self, cfg):
+        """初始化检测预测器
+        
+        新增：评估指标 - 初始化导出器
+        """
+        super().__init__(cfg)
+        
+        # 新增：评估指标 - 初始化结果导出器
+        self.result_exporter = None
+        if EXPORT_AVAILABLE:
+            try:
+                self.result_exporter = TrackingResultExporter(output_dir='evaluation')
+            except Exception as e:
+                print(f"警告: 初始化结果导出器失败: {e}")
 
     def get_annotator(self, img):
         return Annotator(img, line_width=self.args.line_thickness, example=str(self.model.names))
@@ -159,10 +200,48 @@ class DetectionPredictor(BasePredictor):
         tracks = tracker.getTrackers()
 
         # 根据简单启发式确定哪些追踪ID被认为是异常的
+        # 新增：评估指标 - 收集异常原因用于导出
         anomalies = set()
+        anomaly_reasons = {}  # 新增：评估指标 - 存储异常原因
         for track in tracks:
-            if _track_is_anomalous(track, self.model.names):
+            is_anomalous, reason = _track_is_anomalous(track, self.model.names)  # 新增：评估指标 - 获取异常原因
+            if is_anomalous:
                 anomalies.add(track.id)
+                anomaly_reasons[track.id] = reason  # 新增：评估指标 - 记录异常原因
+
+        # 新增：评估指标 - 导出追踪结果
+        if self.result_exporter is not None and len(tracked_dets) > 0:
+            try:
+                if frame == 1:  # 首次导出时设置视频信息
+                    fps = self.dataset.fps if hasattr(self.dataset, 'fps') else 30
+                    resolution = (im0.shape[1], im0.shape[0])
+                    self.result_exporter.set_video_info(
+                        video_path=str(p),
+                        fps=fps,
+                        resolution=resolution
+                    )
+                
+                # 导出每个追踪对象的结果
+                for track in tracks:
+                    if len(track.bbox_history) > 0:
+                        bbox = track.bbox_history[-1]
+                        class_idx = int(track.detclass)
+                        class_name = self.model.names[class_idx] if class_idx < len(self.model.names) else str(class_idx)
+                        confidence = track.confidence if hasattr(track, 'confidence') else 0.95
+                        is_anomalous = track.id in anomalies
+                        reason = anomaly_reasons.get(track.id, '')
+                        
+                        self.result_exporter.add_frame_result(
+                            frame_id=frame,
+                            track_id=track.id,
+                            bbox=bbox,
+                            class_name=class_name,
+                            confidence=confidence,
+                            is_anomalous=is_anomalous,
+                            reason=reason
+                        )
+            except Exception as e:
+                print(f"警告: 导出追踪结果失败: {e}")
 
         for track in tracks:
             color = (0, 0, 255) if track.id in anomalies else rand_color_list[track.id]
@@ -202,6 +281,17 @@ def predict(cfg):
     cfg.source = cfg.source if cfg.source is not None else ROOT / "assets"
     predictor = DetectionPredictor(cfg)
     predictor()
+    
+    # 新增：评估指标 - 导出最终结果
+    if predictor.result_exporter is not None:
+        try:
+            print("\n新增：评估指标 - 正在导出评估结果...")
+            predictor.result_exporter.export_json()
+            predictor.result_exporter.export_statistics()
+            predictor.result_exporter.export_summary()
+            print("新增：评估指标 - 导出完成！")
+        except Exception as e:
+            print(f"新增：评估指标 - 导出失败: {e}")
 
 
 if __name__ == "__main__":

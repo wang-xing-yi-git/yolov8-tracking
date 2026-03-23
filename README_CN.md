@@ -76,6 +76,15 @@ yolov8-tracking/
 │       ├── yolov8l.yaml           # Large版本配置
 │       └── yolov8x.yaml           # XLarge版本配置（高精度）
 │
+├── evaluation/                    # 🆕 异常检测精度评估模块 ⭐
+│   ├── anomaly_evaluator.py       # 异常检测评估器（计算TP/FP/FN/TN、精确率等）
+│   ├── result_exporter.py         # 追踪结果导出器（导出JSON/统计/报告）
+│   ├── integrate_exporter.py      # 集成教程（如何在detect_and_trk.py中集成）
+│   ├── 评估指南.md                # 详细评估方法论和使用指南
+│   ├── 完整工作流程指南.md        # 端到端的评估工作流程（4步走）
+│   ├── test_annotations.json      # 示例：手动标注的地面真实数据
+│   └── predictions.json           # 示例：程序生成的预测结果
+│
 ├── runs/                          # 训练和推理输出结果
 │   └── detect/
 │       └── train/                 # 所有推理结果输出目录
@@ -84,7 +93,8 @@ yolov8-tracking/
 ├── yolov8s.pt                     # 预训练权重文件（Small）
 ├── requirements.txt               # Python依赖列表
 ├── LICENSE                        # 许可证
-└── README.md                      # 项目文档（本文件）
+├── README.md                      # 项目文档（英文版）
+└── README_CN.md                   # 项目文档（中文版）
 ```
 
 ### 关键模块说明
@@ -295,6 +305,167 @@ detect_and_trk.py 的 predict() 函数被调用
 
 ---
 
+## 🆕 异常检测精度评估流程
+
+若要评估异常检测算法的精度（准确率、精确率、召回率、F1分数等），需经历以下4个步骤：
+
+### 步骤1️⃣: 准备测试数据和手动标注
+
+```
+选择测试视频 → 用CVAT/LabelImg标注 → 保存为JSON格式
+    ↓
+evaluation/
+  ├── test_video.mp4              # 测试视频
+  ├── test_annotations.json       # 手动标注的地面真实（你需要创建）
+  └── predictions.json            # 程序生成的预测（自动生成）
+```
+
+#### **标注格式说明**
+
+在 `evaluation/test_annotations.json` 中，标注格式如下：
+
+```json
+{
+  "video": "test.mp4",
+  "fps": 30,
+  "frames": [
+    {
+      "frame_id": 1,
+      "anomalies": [
+        {
+          "track_id": 1,
+          "is_anomalous": false,
+          "reason": "正常行驶"
+        },
+        {
+          "track_id": 2,
+          "is_anomalous": true,
+          "reason": "位置突跳，速度异常"
+        }
+      ]
+    },
+    {
+      "frame_id": 2,
+      "anomalies": [
+        {
+          "track_id": 1,
+          "is_anomalous": true,
+          "reason": "继续位置突跳"
+        }
+      ]
+    }
+  ]
+}
+```
+
+**关键字段**：
+- `frame_id`: 帧编号（从1开始）
+- `track_id`: 追踪ID（从程序输出获取）
+- `is_anomalous`: 布尔值，是否异常
+- `reason`: 异常原因（可选）
+
+**标注规则**：
+- 车辆：`is_anomalous=true` 表示位置突跳 (>100px/帧)
+- 人物：`is_anomalous=true` 表示躺倒 (宽高比异常)
+
+详见：[evaluation/标注格式详解.md](evaluation/标注格式详解.md)
+
+### 步骤2️⃣: 运行程序生成预测结果
+
+修改 `detect_and_trk.py` 添加导出功能（参考 `evaluate/integrate_exporter.py`）：
+
+```python
+# 在主循环中添加
+from evaluation.result_exporter import TrackingResultExporter
+
+exporter = TrackingResultExporter(output_dir='evaluation')
+exporter.set_video_info(video_path=source, fps=fps)
+
+for frame_id, (path, img, im0s, vid_cap, s) in enumerate(dataset, 1):
+    # 推理、追踪、异常检测...
+    is_anomalous, reason = _track_is_anomalous(...)
+    
+    # 导出结果
+    exporter.add_frame_result(
+        frame_id=frame_id,
+        track_id=track_id,
+        bbox=bbox,
+        class_name=class_name,
+        confidence=confidence,
+        is_anomalous=is_anomalous,
+        reason=reason
+    )
+
+# 最后导出
+exporter.export_json('predictions.json')
+exporter.export_statistics()
+```
+
+生成输出文件：
+```
+evaluation/
+  ├── predictions.json       # 程序生成的预测
+  ├── statistics.json        # 统计信息
+  └── summary.txt           # 文本报告
+```
+
+### 步骤3️⃣: 运行评估器计算指标
+
+```python
+from evaluation.anomaly_evaluator import AnomalyEvaluator
+
+evaluator = AnomalyEvaluator(
+    annotations_file='evaluation/test_annotations.json',
+    predictions_file='evaluation/predictions.json'
+)
+
+# 执行评估
+results = evaluator.evaluate()
+
+# 显示和保存结果
+evaluator.print_results()
+evaluator.save_results('evaluation/evaluation_results.json')
+evaluator.export_csv('evaluation/evaluation_results.csv')
+```
+
+输出指标：
+```
+✓ 评估完成！
+
+混淆矩阵:
+       预测正常  预测异常
+实际正常  189      2
+实际异常   1       8
+
+精度指标:
+  准确率 (Accuracy):  98.50%
+  精确率 (Precision): 80.00%
+  召回率 (Recall):    88.89%
+  F1分数:             84.21%
+```
+
+### 步骤4️⃣: 分析结果并优化参数
+
+根据评估结果调整异常检测阈值：
+
+```python
+# 在 detect_and_trk.py 中修改
+
+# 问题: 精确率低（FP多）→ 提高阈值
+CAR_SPEED_THRESHOLD = 150         # 提高速度阈值
+PERSON_ASPECT_RATIO_THRESHOLD = 0.4  # 降低宽高比阈值
+
+# 问题: 召回率低（FN多）→ 降低阈值
+CAR_SPEED_THRESHOLD = 80          # 降低速度阈值
+PERSON_ASPECT_RATIO_THRESHOLD = 0.6  # 提高宽高比阈值
+```
+
+然后重复步骤2-4进行迭代优化。
+
+详详细工作流程请参考 `evaluation/完整工作流程指南.md`。
+
+---
+
 ## 快速开始
 
 ### 1. 克隆仓库
@@ -337,6 +508,39 @@ python yolo/v8/detect/detect_and_trk.py model=yolov8m.pt source=1 show=True
 ```bash
 python yolo/v8/detect/detect_and_trk.py model=yolov8n.pt source="video.mp4" device=0
 ```
+
+### 🆕 4. 评估异常检测精度
+
+```bash
+# 快速评估示例（使用模拟数据）
+cd evaluation
+python -c "
+from anomaly_evaluator import AnomalyEvaluator
+from result_exporter import TrackingResultExporter
+
+# 生成模拟预测数据
+exporter = TrackingResultExporter()
+exporter.set_video_info('test.mp4', 30)
+for i in range(1, 101):
+    exporter.add_frame_result(
+        frame_id=i,
+        track_id=1,
+        bbox=[100, 100, 200, 200],
+        class_name='car',
+        confidence=0.95,
+        is_anomalous=(i > 50),  # 后50帧标记为异常
+        reason='速度过快' if i > 50 else ''
+    )
+exporter.export_json('demo_predictions.json')
+
+# 运行评估
+evaluator = AnomalyEvaluator('test_annotations.json', 'demo_predictions.json')
+evaluator.evaluate()
+evaluator.print_results()
+"
+```
+
+**完整的评估工作流程参考**：[evaluation/完整工作流程指南.md](evaluation/完整工作流程指南.md)
 
 ### 输出说明
 
@@ -390,6 +594,18 @@ sort_iou_thresh = 0.2   # 关联的IOU阈值
 ```python
 CAR_SPEED_THRESHOLD = 100          # 车辆突跳像素阈值
 PERSON_ASPECT_RATIO_THRESHOLD = 0.5  # 人物躺倒宽高比阈值
+```
+
+### 🆕 异常检测精度评估参数
+
+```python
+# evaluation/anomaly_evaluator.py 中使用
+annotations_file = 'evaluation/test_annotations.json'  # 手动标注的地面真实
+predictions_file = 'evaluation/predictions.json'       # 程序生成的预测
+
+# 评估输出文件
+evaluation_results_json = 'evaluation/evaluation_results.json'  # JSON格式结果
+evaluation_results_csv = 'evaluation/evaluation_results.csv'   # CSV格式结果
 ```
 
 ---
@@ -532,6 +748,28 @@ python yolo/v8/detect/detect_and_trk.py \
     iou=0.5     # 提高IOU（避免框重叠）
 ```
 
+### 🆕 Q5: 如何评估异常检测的精度？
+
+**流程**: 手动标注 → 程序预测 → 评估器计算指标 → 分析结果优化
+
+1. **准备标注**: 使用CVAT/LabelImg手动标注测试视频，保存为JSON
+2. **生成预测**: 运行修改后的`detect_and_trk.py`，导出预测结果
+3. **计算指标**: 使用`AnomalyEvaluator`计算TP/FP/FN/TN、精确率、召回率、F1分数
+4. **分析结果**: 根据指标调整阈值，重复2-3步优化
+
+详见 `evaluation/完整工作流程指南.md`
+
+### 🆕 Q6: 精确率和召回率如何平衡？
+
+```
+根据实际需求:
+- 安全应用 (如避免碰撞): 优先召回率 (减少遗漏)
+- 用户体验 (如提醒): 优先精确率 (减少误报)
+- 一般应用: 使用F1分数平衡
+
+F1分数 = 2 × (精确率 × 召回率) / (精确率 + 召回率)
+```
+
 ---
 
 ## 训练自定义模型
@@ -579,7 +817,63 @@ python yolo/v8/detect/train.py \
 
 ---
 
-## 参考资源
+## 🆕 异常检测精度评估指南
+
+本项目提供了完整的异常检测精度评估框架，帮助您：
+- 📊 **定量评估** - 计算精确率、召回率、F1分数等指标
+- 🔍 **问题诊断** - 识别误报(FP)和漏检(FN)问题
+- 🎯 **参数优化** - 基于评估结果调整异常检测阈值
+- 📈 **对比分析** - 使用相同测试集对比多个模型版本
+
+### 核心模块
+
+| 文件 | 功能 |
+|------|------|
+| `anomaly_evaluator.py` | 异常检测评估器，计算TP/FP/FN/TN和指标 |
+| `result_exporter.py` | 追踪结果导出器，支持JSON/CSV/文本导出 |
+| `integrate_exporter.py` | 集成教程，展示如何在detect_and_trk.py中添加导出 |
+| `评估指南.md` | 评估方法论和JSON格式说明 |
+| `完整工作流程指南.md` | **推荐阅读** - 4步完整评估工作流程 |
+
+### 快速评估
+
+```python
+from evaluation.anomaly_evaluator import AnomalyEvaluator
+
+# 创建评估器
+evaluator = AnomalyEvaluator(
+    annotations_file='evaluation/test_annotations.json',     # 手动标注
+    predictions_file='evaluation/predictions.json'           # 程序预测
+)
+
+# 执行评估
+results = evaluator.evaluate()
+
+# 显示结果
+evaluator.print_results()
+
+# 导出结果
+evaluator.save_results('evaluation_results.json')
+evaluator.export_csv('evaluation_results.csv')
+```
+
+### 评估指标说明
+
+| 指标 | 公式 | 含义 |
+|------|------|------|
+| **准确率** | (TP+TN)/(TP+FP+FN+TN) | 整体预测正确率 |
+| **精确率** | TP/(TP+FP) | 预测为异常的中真实异常的比例 |
+| **召回率** | TP/(TP+FN) | 实际异常被正确检测的比例 |
+| **F1分数** | 2×精确率×召回率/(精确率+召回率) | 精确率和召回率的调和平均 |
+
+**TP** = True Positive（正确检测异常）
+**FP** = False Positive（误报）
+**FN** = False Negative（漏检）
+**TN** = True Negative（正确识别正常）
+
+详见：[evaluation/完整工作流程指南.md](evaluation/完整工作流程指南.md)
+
+---
 
 - **官方YOLOv8仓库**: https://github.com/ultralytics/ultralytics
 - **SORT论文**: https://arXiv.org/pdf/1602.00763.pdf
